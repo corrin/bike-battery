@@ -1,0 +1,27 @@
+# XcodeGen spec; CI generates BikeBattery.xcodeproj from this (never committed).
+name: BikeBattery
+options:
+  bundleIdPrefix: local.bikebattery
+  deploymentTarget:
+    iOS: "17.0"
+targets:
+  BikeBattery:
+    type: application
+    platform: iOS
+    sources: [Bike]
+    scheme: {}
+    info:
+      path: Bike/Info.plist
+      properties:
+        CFBundleDisplayName: Bike Battery
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        NSBluetoothAlwaysUsageDescription: Reads battery voltage from your e-bike controller.
+        UIBackgroundModes: [bluetooth-central, audio]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: local.bikebattery.app
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1"

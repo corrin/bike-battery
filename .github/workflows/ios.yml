@@ -1,0 +1,24 @@
+name: build
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  ios:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Self-test frame parsing
+        run: swiftc -o "$RUNNER_TEMP/selftest" ios/Bike/Frame.swift ios/selftest/main.swift && "$RUNNER_TEMP/selftest"
+      - name: Generate Xcode project
+        run: brew install xcodegen && xcodegen --spec ios/project.yml
+      - name: Build unsigned app
+        run: xcodebuild -project ios/BikeBattery.xcodeproj -scheme BikeBattery -configuration Release -sdk iphoneos -derivedDataPath build CODE_SIGNING_ALLOWED=NO
+      - name: Package ipa
+        run: mkdir Payload && cp -R build/Build/Products/Release-iphoneos/BikeBattery.app Payload/ && zip -qr BikeBattery.ipa Payload
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "build-${{ github.run_number }}" BikeBattery.ipa --title "Build ${{ github.run_number }}" --notes "Commit ${{ github.sha }}"
