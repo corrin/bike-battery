@@ -6,7 +6,7 @@ final class Bike: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     static let service = CBUUID(string: "6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
     static let notify = CBUUID(string: "6E400003-B5A3-F393-E0A9-E50E24DCCA9E")
 
-    @Published var state = "Starting Bluetooth"
+    @Published var state = "Starting Bluetooth" { didSet { if state != oldValue { log("STATE \(state)") } } }
     @Published var status: Status?
     /// Lowest voltage seen at < 100 W since connecting, like the official app's set_dianchi; ignores sag under load.
     @Published var restingV: Int?
@@ -17,6 +17,32 @@ final class Bike: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     private var buf: [UInt8] = []
     private var lastBand: Int?
     private let voice = AVSpeechSynthesizer()
+    private var seenNames: Set<String> = []
+    private let stamp: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+
+    /// Everything we see, for offline analysis. Also visible in the Files app (UIFileSharingEnabled).
+    // ponytail: grows forever (~5 MB per few hours of riding); clear it from the app, add rotation if it bites.
+    let logURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("bike-log.txt")
+
+    func log(_ line: String) {
+        let entry = Data("\(stamp.string(from: Date())) \(line)\n".utf8)
+        if let h = try? FileHandle(forWritingTo: logURL) {
+            h.seekToEndOfFile()
+            h.write(entry)
+            try? h.close()
+        } else {
+            try? entry.write(to: logURL)
+        }
+    }
+
+    func clearLog() {
+        try? FileManager.default.removeItem(at: logURL)
+        log("LOG cleared")
+    }
 
     var settings: Settings {
         let d = UserDefaults.standard
@@ -28,12 +54,15 @@ final class Bike: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         UserDefaults.standard.register(defaults: ["fullV": 42.0, "emptyV": 32.0, "kmPerCharge": 40.0])
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .voicePrompt, options: [.duckOthers, .interruptSpokenAudioAndMixWithOthers])
         voice.delegate = self
+        log("APP started")
         central = CBCentralManager(delegate: self, queue: nil)
     }
 
     func say() {
         try? AVAudioSession.sharedInstance().setActive(true)
-        voice.speak(AVSpeechUtterance(string: restingV.map { summary(volts: $0, settings) } ?? "Bike battery unknown."))
+        let text = restingV.map { summary(volts: $0, settings) } ?? "Bike battery unknown."
+        log("SAY \(text)")
+        voice.speak(AVSpeechUtterance(string: text))
     }
 
     func speechSynthesizer(_ s: AVSpeechSynthesizer, didFinish u: AVSpeechUtterance) {
@@ -50,8 +79,13 @@ final class Bike: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     }
 
     func centralManager(_ c: CBCentralManager, didDiscover p: CBPeripheral, advertisementData ad: [String: Any], rssi: NSNumber) {
-        let name = ((ad[CBAdvertisementDataLocalNameKey] as? String) ?? p.name ?? "").uppercased()
-        guard name == "BLE-MOTOR" || name == "BLE_MOTOR" else { return }
+        let name = (ad[CBAdvertisementDataLocalNameKey] as? String) ?? p.name ?? ""
+        if seenNames.insert("\(name)|\(p.identifier)").inserted {
+            log("SEEN \(name.isEmpty ? "(no name)" : name) id=\(p.identifier) rssi=\(rssi) ad=\(ad)")
+        }
+        // Same rule as the official app's handleDiscoverPeripheral.
+        guard name.contains("Keyde") || name.lowercased().contains("motor") else { return }
+        log("PICK \(name) id=\(p.identifier)")
         c.stopScan()
         peripheral = p
         p.delegate = self
@@ -68,6 +102,7 @@ final class Bike: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     }
 
     func centralManager(_ c: CBCentralManager, didDisconnectPeripheral p: CBPeripheral, error: Error?) {
+        log("DISCONNECT \(error.map { "\($0)" } ?? "")")
         state = "Disconnected, waiting for bike"
         status = nil
         c.connect(p) // never times out; completes when the bike is back in range
@@ -85,15 +120,21 @@ final class Bike: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             state = "Bike has no Nordic UART service (different controller variant?)"
             return
         }
-        p.discoverCharacteristics([Self.notify], for: s)
+        log("SERVICES \(p.services?.map { $0.uuid.uuidString } ?? [])")
+        p.discoverCharacteristics(nil, for: s)
     }
 
     func peripheral(_ p: CBPeripheral, didDiscoverCharacteristicsFor s: CBService, error: Error?) {
-        guard let ch = s.characteristics?.first(where: { $0.uuid == Self.notify }) else {
+        let chars = s.characteristics ?? []
+        for ch in chars {
+            log("CHAR \(ch.uuid.uuidString) props=\(ch.properties.rawValue)")
+            // Listen (never write) on every notify/indicate characteristic, e.g. the extra 6E400004.
+            if !ch.properties.isDisjoint(with: [.notify, .indicate]) { p.setNotifyValue(true, for: ch) }
+        }
+        guard chars.contains(where: { $0.uuid == Self.notify }) else {
             state = "Bike has no 6E400003 characteristic"
             return
         }
-        p.setNotifyValue(true, for: ch)
         state = "Listening"
         DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
             guard let self, self.state == "Listening", self.status == nil else { return }
@@ -103,10 +144,14 @@ final class Bike: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
 
     func peripheral(_ p: CBPeripheral, didUpdateValueFor ch: CBCharacteristic, error: Error?) {
         guard let data = ch.value else { return }
-        notifications = Array(([data.map { String(format: "%02X", $0) }.joined(separator: " ")] + notifications).prefix(50))
+        let hex = data.map { String(format: "%02X", $0) }.joined(separator: " ")
+        log("RX \(ch.uuid.uuidString) \(hex)")
+        notifications = Array((["\(ch.uuid.uuidString.prefix(8)) \(hex)"] + notifications).prefix(50))
+        guard ch.uuid == Self.notify else { return }
         buf += data
         for f in takeFrames(&buf) {
             let s = parseStatus(f)
+            log("STATUS \(s.volts) V \(s.powerW) W")
             status = s
             state = "Receiving"
             if s.powerW < 100, s.volts > 0 { restingV = min(restingV ?? s.volts, s.volts) }

@@ -38,6 +38,10 @@ struct ContentView: View {
                 } footer: {
                     Text("Full ≈ nominal × 1.17, empty ≈ nominal × 0.89. A 36 V pack is about 42 / 32.")
                 }
+                Section("Log") {
+                    ShareLink("Share log", item: bike.logURL)
+                    Button("Clear log", role: .destructive) { bike.clearLog() }
+                }
                 Section("Raw notifications, newest first") {
                     ForEach(Array(bike.notifications.enumerated()), id: \.offset) { _, line in
                         Text(line).font(.caption.monospaced())
