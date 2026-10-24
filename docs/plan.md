@@ -1,83 +1,73 @@
-# Plan: e-bike battery announcer alongside Google Maps (iPhone 16e)
+# Bike Battery: every step from now to riding with it
 
 ## Context
-Use the real Google Maps app unchanged for navigation, and add only what the phone can't know: the e-bike's battery and remaining range. Write as little code as possible, and pay nothing to install it.
+The goal: while riding with Google Maps, the iPhone speaks the e-bike's battery % and range, which Google Maps can't know. Our app does only that and leaves Google Maps alone.
 
-From the decompile (`docs/protocol.md`, `tools/frames.py`):
-- The bike (`BLE-MOTOR`, Nordic UART) pushes status frames on `6E400003`.
-- The only battery information in them is whole-volt pack voltage (byte 3, or byte 15 if the second-battery flag is set).
-- The bike sends no range; we estimate it.
-- Writing to the bike means sending all its settings, so v1 never writes.
+What exists now:
+- The app is written and builds automatically on GitHub (Build 3 at github.com/corrin/bike-battery/releases). It has not yet run on a phone.
+- The app logs everything it sees and sends the log to me automatically. You never handle logs.
+- This PC already has iTunes, which the installer needs on Windows. Nothing new from Apple needs installing.
 
-## Decisions (mine to make, stated so they can be overruled)
-- **Install route: SideStore + GitHub Actions.** It's free and needs no Xcode on the Mac. The initial install works from the Windows PC or the Mac (per docs.sidestore.io prerequisites; Windows needs iTunes). After that, everything happens on the phone. The alternative, Xcode free provisioning, means a weekly USB re-install from a Mac with Xcode kept installed, which rules it out given the Mac's disk space.
-  - Weekly upkeep: connect the LocalDevVPN app, open SideStore and tap refresh. An iOS Shortcuts automation can make that one tap.
-- **Display v1: spoken announcements** mixed with Google Maps' voice, plus a plain in-app status screen. The floating Picture-in-Picture box (`UIPiPView`) is deferred until rides show a visual is wanted.
-- **Read-only:** v1 never writes to the bike.
-- **Repo:** private GitHub repo. The free plan includes 2,000 Actions minutes a month; macOS runners count at 10×, giving about 200 macOS minutes, or roughly 25 builds a month.
-  - Excluded from git: `apk/`, `extracted/`, `decompiled/`, `.venv/` (third-party code).
+**One small code change before we start (me):** make the log upload happen the moment you leave the app. It already does that, and the 5-minute timer stays as a backup. That way, no step below involves waiting a set number of minutes.
 
-## Phase 0: garage check (user, about 5 min, no code). Gates the BLE code.
-Run the nRF Connect steps already given. Results needed:
-1. The advertised name.
-2. Whether frames arrive without writing anything.
-3. Sample hex values.
-4. The pack's voltage rating from its label.
+## A. One-time setup (about 20 min, at your desk; no bike needed)
+On the **iPhone**:
+1. If the phone has no passcode, set one (Settings → Face ID & Passcode).
+2. App Store: install **LocalDevVPN** (apps.apple.com/app/localdevvpn/id6755608044).
 
-If no frames arrive, stop and re-plan: the app would have to send the settings frame, built from the official app's current settings read off the tablet.
+On **this PC**:
+3. Download and run **iloader**: github.com/nab138/iloader/releases/latest/download/iloader-windows-x64.msi
+4. Plug the iPhone in with a USB cable. When the phone asks "Trust this computer?", tap **Trust** and enter your passcode.
+5. In iloader:
+   - Sign in with your Apple ID (the password is case-sensitive).
+   - Select the iPhone.
+   - Click **Install SideStore (Stable)**.
+   - Unplug when it's done. The cable is never needed again.
 
-## Phase 1: app + pipeline (me)
-Files (all new):
-- `.gitignore`
-- `ios/project.yml`: XcodeGen spec.
-  - iOS 17 deployment target, `SWIFT_VERSION 5`, generated Info.plist.
-  - `NSBluetoothAlwaysUsageDescription`.
-  - `UIBackgroundModes: [bluetooth-central, audio]`.
-- `ios/Bike/Frame.swift`: pure Foundation, no UIKit. A port of `tools/frames.py` `verify()` and `parse_status()`, battery fields only.
-  - Find frames in a byte buffer: start at `0x55`, try lengths 40 then 20, validate the checksum. This handles notifications split across packets.
-  - Battery % is linear between the empty and full voltages.
-  - Only voltage seen while power < 100 W is used, and the lowest such reading is latched (copied from the official app's `set_dianchi`). This stops voltage sag and recovery from flapping the number.
-  - Range = % × km-per-charge.
-- `ios/Bike/Bike.swift`: CoreBluetooth central.
-  - Scan for name `BLE-MOTOR`/`BLE_MOTOR`, connect, subscribe to `6E400003`, auto-reconnect.
-  - Keep the last 50 hex frames for the debug view.
-  - If no frame arrives within 10 s, set state to "connected but bike sends nothing".
-  - Announce via `AVSpeechSynthesizer` when the latched percent drops a band (10 %), plus once on connect. Audio session: `.playback` with `.duckOthers` / `.interruptSpokenAudioAndMixWithOthers`.
-- `ios/Bike/App.swift`: one SwiftUI screen.
-  - Shows state, volts, %, range, a "Say it now" button and the raw-frame list.
-  - Settings via `@AppStorage`: full V, empty V, km per charge. Defaults come from the pack's nominal voltage: cells = nominal/3.6, full = cells × 4.2, empty = cells × 3.2.
-- `ios/selftest/main.swift`: assert checks using the test vectors from `tools/frames.py` `__main__`, plus the real captured frames from phase 0.
-- `.github/workflows/ios.yml` on a `macos-15` runner. Steps:
-  1. `swiftc Frame.swift selftest/main.swift` and run the result.
-  2. `brew install xcodegen`, then `xcodegen`.
-  3. `xcodebuild -sdk iphoneos CODE_SIGNING_ALLOWED=NO`.
-  4. Zip `Payload/*.app` into `BikeBattery.ipa`.
-  5. Attach the `.ipa` to a GitHub Release so it's easy to find on the phone.
-- `docs/install.md`: phone setup and update steps.
+On the **iPhone**:
 
-Needs the user's OK before running: creating the private GitHub repo and pushing (`gh repo create --private`).
+6. Settings → General → **VPN & Device Management**. Under "Developer App", tap your Apple ID and tap **Trust**.
+7. Settings → Privacy & Security → **Developer Mode** → On. The phone restarts and asks you to confirm.
+8. Open **LocalDevVPN** and tap **Connect**.
+9. Open **SideStore** and sign in with the same Apple ID. Go to **My Apps** and tap the **7 DAYS** label next to SideStore. If it asks about a certificate, tap Yes.
+10. In Safari, go to **github.com/corrin/bike-battery/releases**. Under the newest Build, tap **BikeBattery.ipa** and confirm the download.
+11. In SideStore, go to **My Apps**, tap **+**, then pick BikeBattery.ipa (in Downloads).
+12. Open **Bike Battery** and tap **Allow** for Bluetooth. You'll see "Looking for BLE-MOTOR". Close it. Setup is done.
 
-## Phase 2: install (user, guided by `docs/install.md`)
-1. Follow the SideStore install: iloader on the PC or Mac, LocalDevVPN on the phone, Developer Mode on, trust the profile.
-2. On the iPhone in Safari: open the repo's Releases page, download `BikeBattery.ipa`, then use Share → SideStore (or SideStore → **+**) to install. (Exact handoff unverified; docs/install.md gets corrected after the first try.)
+If any screen doesn't match these steps, send me a screenshot or a description and I'll correct `docs/install.md`.
 
-## Phase 3: ride test
-- Check that announcements play while Google Maps is in front and the screen is locked.
-  - Risk: speaking from the background depends on the audio session staying active.
-- Calibrate the full voltage after a charge, and km per charge after a few rides.
+## B. First bike check (about 2 min, at the bike)
+1. Turn the bike on.
+2. Open **Bike Battery** and watch the top line. Within about a minute it will show one of:
+   - **"Receiving"**: it works, and a Battery line appears.
+   - **"Connected, but the bike sends nothing…"**: the bike needs a wake-up message. I'd handle that next.
+   - **"Looking for BLE-MOTOR"** that never changes: the bike's name is different. The log shows me the real name.
+3. Close the app (swipe home). The log uploads as you do.
+4. Tell me which message you saw. I read the log myself.
 
-## Considered and parked: our own app with Google navigation inside it
-The Google Navigation SDK for iOS embeds Google's turn-by-turn guidance, including cycling, inside our app. We could then draw the battery on top natively, with no hack.
-- **Cost:** pay-as-you-go. The first 1,000 destinations a month are free and guidance and reroutes aren't billed, but it still needs a Google Cloud billing account with a card. Some pages say it's "available only to some customers".
-- **Losses:** saved places, history and voice search, plus new Google Maps features as Google adds them. We'd also need a destination search screen.
-- **Apple MapKit is out:** it has no in-app cycling directions, only a handoff to Apple Maps.
-- **Revisit** if announcements and the PiP box both prove inadequate.
+## C. What I do after B
+- **"Receiving":** check the voltage readings against your pack, set sensible full and empty voltages, and push a new build if anything needs fixing.
+- **"Sends nothing" or a wrong name:** work out the fix from the log and tell you exactly what changes before building anything. A wake-up message would mean writing to the bike, and I won't do that without your OK.
+- **New builds:** repeat A10–A11 only (download, then SideStore +).
 
-## Later, only if wanted
-- The floating PiP box (`UIPiPView`, pinned to `55994ac`).
-- Gear buttons, after reading the current settings from the official app.
+## D. First ride
+1. Open Bike Battery and leave it running (switch to Google Maps as normal).
+2. Ride. You should hear "Bike battery N percent, about N kilometres" when it connects and each time it drops 10 %.
+3. Afterwards, tell me whether you heard it and roughly how far you rode. I adjust the range estimate from the log.
 
-## Verification
-- **CI:** the selftest asserts pass, including real frames from phase 0, and the build produces the `.ipa`.
-- **Phone:** the app installs via SideStore, the debug list shows frames from the bike, and the voltage matches what's expected for the pack.
-- **Ride:** with Google Maps navigating and the phone locked, at least one battery announcement is heard, and it reconnects after the bike is power-cycled.
+## E. Weekly upkeep (30 seconds, once every 7 days)
+Free Apple IDs make sideloaded apps stop opening after 7 days. To renew:
+1. Open LocalDevVPN and tap Connect.
+2. Open SideStore, go to My Apps, tap **Refresh All**.
+
+If you forget, nothing is lost: the app just won't open until you refresh. (This can be automated later with an iOS Shortcut if it annoys you.)
+
+## Not planned unless you ask
+- An on-screen floating box over Google Maps.
+- Gear up/down buttons. These need writes to the bike.
+- Ride history.
+
+## Verification (mine)
+- **CI:** stays green with the self-tests passing.
+- **After B:** the log appears via ntfy.sh, and I confirm what the bike sent.
+- **After D:** the log shows SAY lines, so announcements fired. You confirm you heard them.
