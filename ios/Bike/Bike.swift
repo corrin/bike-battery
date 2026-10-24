@@ -10,7 +10,6 @@ final class Bike: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     @Published var status: Status?
     /// Lowest voltage seen at < 100 W since connecting, like the official app's set_dianchi; ignores sag under load.
     @Published var restingV: Int?
-    @Published var notifications: [String] = []
 
     private var central: CBCentralManager!
     private var peripheral: CBPeripheral?
@@ -24,8 +23,8 @@ final class Bike: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         return f
     }()
 
-    /// Everything we see, for offline analysis. Also visible in the Files app (UIFileSharingEnabled).
-    // ponytail: grows forever (~5 MB per few hours of riding); clear it from the app, add rotation if it bites.
+    /// Everything we see, for offline analysis; upload() ships it to the repo.
+    // ponytail: never trimmed (a few MB per ride); rotate if phone storage ever matters.
     let logURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("bike-log.txt")
 
     func log(_ line: String) {
@@ -39,9 +38,30 @@ final class Bike: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         }
     }
 
-    func clearLog() {
-        try? FileManager.default.removeItem(at: logURL)
-        log("LOG cleared")
+    /// ntfy.sh relay; .github/workflows/logs.yml collects uploads into the repo's logs/ hourly.
+    static let ntfy = URL(string: "https://ntfy.sh/bike-battery-212ff9cab06a5188")!
+    private var uploading = false
+
+    /// Sends the part of the log not yet uploaded. The offset only advances on success, so nothing is lost offline.
+    func upload() {
+        guard !uploading, let h = try? FileHandle(forReadingFrom: logURL) else { return }
+        let offset = UserDefaults.standard.integer(forKey: "uploadedBytes")
+        try? h.seek(toOffset: UInt64(offset))
+        let chunk = (try? h.read(upToCount: 10_000_000)) ?? Data() // ntfy.sh attachment limit is 15 MB
+        try? h.close()
+        guard !chunk.isEmpty else { return }
+        var req = URLRequest(url: Self.ntfy)
+        req.httpMethod = "PUT"
+        req.setValue("bike-log.txt", forHTTPHeaderField: "Filename")
+        uploading = true
+        URLSession.shared.uploadTask(with: req, from: chunk) { _, resp, _ in
+            DispatchQueue.main.async {
+                self.uploading = false
+                if (resp as? HTTPURLResponse)?.statusCode == 200 {
+                    UserDefaults.standard.set(offset + chunk.count, forKey: "uploadedBytes")
+                }
+            }
+        }.resume()
     }
 
     var settings: Settings {
@@ -55,6 +75,7 @@ final class Bike: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .voicePrompt, options: [.duckOthers, .interruptSpokenAudioAndMixWithOthers])
         voice.delegate = self
         log("APP started")
+        Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in self?.upload() }
         central = CBCentralManager(delegate: self, queue: nil)
     }
 
@@ -105,6 +126,7 @@ final class Bike: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         log("DISCONNECT \(error.map { "\($0)" } ?? "")")
         state = "Disconnected, waiting for bike"
         status = nil
+        upload()
         c.connect(p) // never times out; completes when the bike is back in range
     }
 
@@ -146,7 +168,6 @@ final class Bike: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         guard let data = ch.value else { return }
         let hex = data.map { String(format: "%02X", $0) }.joined(separator: " ")
         log("RX \(ch.uuid.uuidString) \(hex)")
-        notifications = Array((["\(ch.uuid.uuidString.prefix(8)) \(hex)"] + notifications).prefix(50))
         guard ch.uuid == Self.notify else { return }
         buf += data
         for f in takeFrames(&buf) {

@@ -1,0 +1,28 @@
+name: logs
+# Collects app log uploads from ntfy.sh (attachments expire after 3 h) into logs/.
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Fetch uploads
+        run: |
+          mkdir -p logs
+          curl -sf "https://ntfy.sh/bike-battery-212ff9cab06a5188/json?poll=1&since=all" |
+            jq -r 'select(.attachment) | "\(.time) \(.id) \(.attachment.url)"' |
+            while read -r t id url; do
+              f="logs/$(date -u -d "@$t" +%Y%m%dT%H%M%SZ)-$id.txt"
+              [ -e "$f" ] || curl -sf -o "$f" "$url" || echo "expired: $id"
+            done
+      - name: Commit
+        run: |
+          git config user.name github-actions
+          git config user.email github-actions@users.noreply.github.com
+          git add logs
+          git diff --cached --quiet || { git commit -m "Collect bike logs"; git push; }

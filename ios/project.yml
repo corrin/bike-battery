@@ -20,8 +20,6 @@ targets:
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         NSBluetoothAlwaysUsageDescription: Reads battery voltage from your e-bike controller.
         UIBackgroundModes: [bluetooth-central, audio]
-        UIFileSharingEnabled: true
-        LSSupportsOpeningDocumentsInPlace: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: local.bikebattery.app
